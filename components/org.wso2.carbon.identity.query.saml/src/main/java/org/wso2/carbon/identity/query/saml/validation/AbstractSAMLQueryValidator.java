@@ -17,6 +17,7 @@
  */
 package org.wso2.carbon.identity.query.saml.validation;
 
+import org.apache.commons.lang.StringUtils;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.opensaml.saml.common.SAMLVersion;
@@ -25,11 +26,16 @@ import org.opensaml.saml.saml2.core.RequestAbstractType;
 import org.wso2.carbon.context.CarbonContext;
 import org.wso2.carbon.identity.base.IdentityException;
 import org.wso2.carbon.identity.core.model.SAMLSSOServiceProviderDO;
+import org.wso2.carbon.identity.core.util.IdentityUtil;
 import org.wso2.carbon.identity.query.saml.dto.InvalidItemDTO;
 import org.wso2.carbon.identity.query.saml.exception.IdentitySAML2QueryException;
 import org.wso2.carbon.identity.query.saml.util.OpenSAML3Util;
 import org.wso2.carbon.identity.query.saml.util.SAMLQueryRequestConstants;
 import org.wso2.carbon.identity.query.saml.util.SAMLQueryRequestUtil;
+import org.wso2.carbon.identity.sso.saml.exception.IdentitySAML2SSOException;
+import org.wso2.carbon.identity.sso.saml.util.SAMLSSOUtil;
+import org.wso2.carbon.user.api.UserStoreException;
+import org.wso2.carbon.utils.multitenancy.MultitenantConstants;
 
 import java.util.List;
 
@@ -66,7 +72,7 @@ public class AbstractSAMLQueryValidator implements SAMLQueryValidator {
             throws IdentitySAML2QueryException {
 
         boolean isIssuerValidated;
-        boolean isSignatureValidated;
+        boolean isSignatureValidated = false;
         boolean isValidSAMLVersion;
 
         try {
@@ -83,8 +89,13 @@ public class AbstractSAMLQueryValidator implements SAMLQueryValidator {
                 return false;
             }
             if (isIssuerValidated) {
-                //validate Signature of Request
-                isSignatureValidated = this.validateSignature(request);
+                //validate Signature of Request if the signature credentials available
+                if (request.getSignature().getSigningCredential() != null) {
+                    isSignatureValidated = this.validateSignature(request);
+                } else {
+                    isSignatureValidated = true;
+                }
+
             } else {
                 //invalid issuer
                 invalidItems.add(new InvalidItemDTO(SAMLQueryRequestConstants.ValidationType.VAL_ISSUER,
@@ -150,19 +161,48 @@ public class AbstractSAMLQueryValidator implements SAMLQueryValidator {
             throw new IdentitySAML2QueryException("Issuer value is empty. Unable to validate issuer");
         } else {
             if (issuer.getFormat() != null && issuer.getFormat().equals(SAMLQueryRequestConstants.GenericConstants.ISSUER_FORMAT)) {
-                    ssoIdpConfig = SAMLQueryRequestUtil.getServiceProviderConfig(issuer.getValue());
-                    if (ssoIdpConfig == null) {
-                        log.error(SAMLQueryRequestConstants.ServiceMessages.NULL_ISSUER);
-                        return validIssuer;
-                    } else {
-                        log.debug(SAMLQueryRequestConstants.ServiceMessages.SUCCESS_ISSUER + ssoIdpConfig.getIssuer());
-                        return !validIssuer;
+                try {
+                    String spEntityID = request.getIssuer().getValue();
+                    if (!SAMLSSOUtil.isSAMLIssuerExists(splitAppendedTenantDomain(spEntityID),
+                            SAMLSSOUtil.getTenantDomainFromThreadLocal())) {
+                        validIssuer = true;
                     }
+                } catch (IdentitySAML2SSOException e) {
+                    log.error("Error while loading saml configs");
+                } catch (UserStoreException e) {
+                    e.printStackTrace();
+                } catch (IdentityException e) {
+                    e.printStackTrace();
+                }
             } else {
                 log.error("NameID format is invalid in request ID:" + request.getID() + " and issuer: " + issuer.getValue());
                 return validIssuer;
             }
         }
+        return validIssuer;
+    }
+
+
+
+    protected String splitAppendedTenantDomain(String issuer) throws UserStoreException, IdentityException {
+
+        if(IdentityUtil.isBlank(SAMLSSOUtil.getTenantDomainFromThreadLocal())) {
+            if (issuer.contains("@")) {
+                String tenantDomain = issuer.substring(issuer.lastIndexOf('@') + 1);
+                issuer = issuer.substring(0, issuer.lastIndexOf('@'));
+                if (StringUtils.isNotBlank(tenantDomain) && StringUtils.isNotBlank(issuer)) {
+                    SAMLSSOUtil.setTenantDomainInThreadLocal(tenantDomain);
+                    if (log.isDebugEnabled()) {
+                        log.debug("Tenant Domain: " + tenantDomain + " & Issuer name: " + issuer + "has been " +
+                                "split");
+                    }
+                }
+            }
+        }
+        if(IdentityUtil.isBlank(SAMLSSOUtil.getTenantDomainFromThreadLocal())){
+            SAMLSSOUtil.setTenantDomainInThreadLocal(MultitenantConstants.SUPER_TENANT_DOMAIN_NAME);
+        }
+        return issuer;
     }
 
     /**
